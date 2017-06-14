@@ -1353,10 +1353,16 @@ class YoutubeIE(YoutubeBaseInfoExtractor):
             start_time = parse_duration(time_point)
             if start_time is None:
                 continue
+            if start_time > duration:
+                break
             end_time = (duration if next_num == len(chapter_lines)
                         else parse_duration(chapter_lines[next_num][1]))
             if end_time is None:
                 continue
+            if end_time > duration:
+                end_time = duration
+            if start_time > end_time:
+                break
             chapter_title = re.sub(
                 r'<a[^>]+>[^<]+</a>', '', chapter_line).strip(' \t-')
             chapter_title = re.sub(r'\s+', ' ', chapter_title)
@@ -1435,6 +1441,7 @@ class YoutubeIE(YoutubeBaseInfoExtractor):
         else:
             age_gate = False
             video_info = None
+            sts = None
             # Try looking directly into the video webpage
             ytplayer_config = self._get_ytplayer_config(video_id, video_webpage)
             if ytplayer_config:
@@ -1451,6 +1458,7 @@ class YoutubeIE(YoutubeBaseInfoExtractor):
                         args['ypc_vid'], YoutubeIE.ie_key(), video_id=args['ypc_vid'])
                 if args.get('livestream') == '1' or args.get('live_playback') == 1:
                     is_live = True
+                sts = ytplayer_config.get('sts')
             if not video_info or self._downloader.params.get('youtube_include_dash_manifest', True):
                 # We also try looking in get_video_info since it may contain different dashmpd
                 # URL that points to a DASH manifest with possibly different itag set (some itags
@@ -1459,17 +1467,27 @@ class YoutubeIE(YoutubeBaseInfoExtractor):
                 # The general idea is to take a union of itags of both DASH manifests (for example
                 # video with such 'manifest behavior' see https://github.com/rg3/youtube-dl/issues/6093)
                 self.report_video_info_webpage_download(video_id)
-                for el_type in ['&el=info', '&el=embedded', '&el=detailpage', '&el=vevo', '']:
-                    video_info_url = (
-                        '%s://www.youtube.com/get_video_info?&video_id=%s%s&ps=default&eurl=&gl=US&hl=en'
-                        % (proto, video_id, el_type))
+                for el in ('info', 'embedded', 'detailpage', 'vevo', ''):
+                    query = {
+                        'video_id': video_id,
+                        'ps': 'default',
+                        'eurl': '',
+                        'gl': 'US',
+                        'hl': 'en',
+                    }
+                    if el:
+                        query['el'] = el
+                    if sts:
+                        query['sts'] = sts
                     video_info_webpage = self._download_webpage(
-                        video_info_url,
+                        '%s://www.youtube.com/get_video_info' % proto,
                         video_id, note=False,
-                        errnote='unable to download video info webpage')
+                        errnote='unable to download video info webpage',
+                        fatal=False, query=query)
+                    if not video_info_webpage:
+                        continue
                     get_video_info = compat_parse_qs(video_info_webpage)
-                    if get_video_info.get('use_cipher_signature') != ['True']:
-                        add_dash_mpd(get_video_info)
+                    add_dash_mpd(get_video_info)
                     if not video_info:
                         video_info = get_video_info
                     if 'token' in get_video_info:
@@ -1703,12 +1721,8 @@ class YoutubeIE(YoutubeBaseInfoExtractor):
                 format_id = url_data['itag'][0]
                 url = url_data['url'][0]
 
-                if 'sig' in url_data:
-                    url += '&signature=' + url_data['sig'][0]
-                elif 's' in url_data:
-                    encrypted_sig = url_data['s'][0]
+                if 's' in url_data or self._downloader.params.get('youtube_include_dash_manifest', True):
                     ASSETS_RE = r'"assets":.+?"js":\s*("[^"]+")'
-
                     jsplayer_url_json = self._search_regex(
                         ASSETS_RE,
                         embed_webpage if age_gate else video_webpage,
@@ -1728,6 +1742,11 @@ class YoutubeIE(YoutubeBaseInfoExtractor):
                             r'ytplayer\.config.*?"url"\s*:\s*("[^"]+")',
                             video_webpage, 'age gate player URL')
                         player_url = json.loads(player_url_json)
+
+                if 'sig' in url_data:
+                    url += '&signature=' + url_data['sig'][0]
+                elif 's' in url_data:
+                    encrypted_sig = url_data['s'][0]
 
                     if self._downloader.params.get('verbose'):
                         if player_url is None:
